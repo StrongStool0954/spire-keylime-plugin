@@ -109,9 +109,8 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 	httpClient := &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				RootCAs:            keylimeCACertPool,
-				Certificates:       []tls.Certificate{keylimeCert},
-				InsecureSkipVerify: true, // TODO - remove after development
+				RootCAs:      keylimeCACertPool,
+				Certificates: []tls.Certificate{keylimeCert},
 			},
 		},
 	}
