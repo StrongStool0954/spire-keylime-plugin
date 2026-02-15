@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
+	"strings"
+	"time"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -67,6 +70,26 @@ type KeylimeVerifierValidateResponse struct {
 	} `json:"results"`
 }
 
+type KeylimeAgentAddRequest struct {
+	TpmPolicy                string `json:"tpm_policy"`
+	MetaData                 string `json:"metadata"`
+	MbRefstate               string `json:"mb_refstate"`
+	MbPolicy                 string `json:"mb_policy"`
+	ImaSignVerificationKeys  string `json:"ima_sign_verification_keys"`
+	RuntimePolicy            string `json:"runtime_policy"`
+	RuntimePolicyName        string `json:"runtime_policy_name"`
+	MbPolicyName             string `json:"mb_policy_name"`
+	RevocationKey            string `json:"revocation_key"`
+	AcceptTpmHashAlgs        string `json:"accept_tpm_hash_algs"`
+	AcceptTpmEncryptionAlgs  string `json:"accept_tpm_encryption_algs"`
+	AcceptTpmSigningAlgs     string `json:"accept_tpm_signing_algs"`
+	AkTpm                    string `json:"ak_tpm"`
+	MtlsCert                 string `json:"mtls_cert"`
+	SupportedVersion         string `json:"supported_version"`
+	CloudAgentIP             string `json:"cloudagent_ip"`
+	CloudAgentPort           string `json:"cloudagent_port"`
+}
+
 func New() *Plugin {
 	return &Plugin{}
 }
@@ -129,6 +152,105 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 		return status.Errorf(codes.Internal, "unable to contact Keylime verifier at %s: %s", keylimeStatusUrl, err)
 	}
 	p.log.Debug("Request results", "url", keylimeStatusUrl, "response", statusRes.StatusCode)
+
+	// If agent doesn't exist in verifier (404), add it
+	if statusRes.StatusCode == http.StatusNotFound {
+		p.log.Info("Agent not found in verifier, adding it", "agent_uuid", agentID)
+
+		// Read agent mTLS certificate
+		certPath := "/etc/spire/keylime/auth-agent-cert.pem"
+		certBytes, err := ioutil.ReadFile(certPath)
+		if err != nil {
+			p.log.Warn("Unable to read agent mTLS certificate, will try without it", "path", certPath, "error", err)
+			certBytes = []byte{}
+		}
+		mtlsCertContent := string(certBytes)
+
+
+		// Get AK from registrar
+		registrarUrl := fmt.Sprintf("https://registrar.keylime.funlab.casa:8891/%s/agents/%s", common_keylime.KeylimeAPIVersion, agentID)
+		p.log.Debug("Fetching AK from registrar", "url", registrarUrl)
+		regReq, err := http.NewRequest(http.MethodGet, registrarUrl, nil)
+		if err != nil {
+			return status.Errorf(codes.Internal, "unable to create registrar request: %v", err)
+		}
+		regRes, err := httpClient.Do(regReq)
+		if err != nil {
+			return status.Errorf(codes.Internal, "unable to contact registrar: %v", err)
+		}
+		defer regRes.Body.Close()
+		
+		var regResults struct {
+			Results struct {
+				AikTpm string `json:"aik_tpm"`
+			} `json:"results"`
+		}
+		err = json.NewDecoder(regRes.Body).Decode(&regResults)
+		if err != nil {
+			return status.Errorf(codes.Internal, "unable to decode registrar response: %v", err)
+		}
+		akTpm := regResults.Results.AikTpm
+		p.log.Debug("Retrieved AK from registrar", "ak_length", len(akTpm))
+		// Create agent add request with minimal policy
+		// RuntimePolicy needs to be base64 encoded with proper IMA policy structure
+		emptyRuntimePolicyJSON := `{"meta":{"version":5,"generator":0},"release":0,"digests":{},"excludes":[],"keyrings":{},"ima":{"ignored_keyrings":[],"log_hash_alg":"sha1","dm_policy":null},"ima-buf":{},"verification-keys":""}`
+		emptyRuntimePolicy := base64.StdEncoding.EncodeToString([]byte(emptyRuntimePolicyJSON))
+
+		addRequest := KeylimeAgentAddRequest{
+			TpmPolicy:               `{"mask": "0x0"}`,
+			MetaData:                "{}",
+			MbRefstate:              "",
+			MbPolicy:                "",
+			MbPolicyName:            "",
+			ImaSignVerificationKeys: "[]",
+			RevocationKey:           "",
+			AcceptTpmHashAlgs:       "[\"sha256\", \"sha384\", \"sha512\"]",
+			AcceptTpmEncryptionAlgs: "[\"rsa\", \"rsa2048\", \"ecc\"]",
+			AcceptTpmSigningAlgs:    "[\"rsassa\", \"rsapss\", \"ecdsa\", \"ecdaa\", \"ecschnorr\"]",
+			AkTpm:                   akTpm,
+			RuntimePolicy:           emptyRuntimePolicy,
+			RuntimePolicyName:       "",
+			SupportedVersion:        "2.5",
+			MtlsCert:                mtlsCertContent,
+			CloudAgentIP:            "10.10.2.70",
+			CloudAgentPort:          "9002",
+		}
+		addBody, err := json.Marshal(addRequest)
+		if err != nil {
+			return status.Errorf(codes.Internal, "unable to marshal agent add request: %v", err)
+		}
+		p.log.Debug("Agent add request body", "json", string(addBody))
+
+		// POST to add agent to verifier
+		addUrl := keylimeStatusUrl
+		p.log.Debug("Adding agent to verifier", "url", addUrl)
+		addReq, err := http.NewRequest(http.MethodPost, addUrl, strings.NewReader(string(addBody)))
+		if err != nil {
+			return status.Errorf(codes.Internal, "unable to create add agent request: %v", err)
+		}
+		addReq.Header.Set("Content-Type", "application/json")
+		
+		addRes, err := httpClient.Do(addReq)
+		if err != nil {
+			return status.Errorf(codes.Internal, "unable to add agent to verifier: %v", err)
+		}
+		p.log.Debug("Add agent response", "status", addRes.StatusCode)
+		
+		if addRes.StatusCode != http.StatusOK && addRes.StatusCode != http.StatusCreated {
+			bodyBytes, _ := ioutil.ReadAll(addRes.Body)
+			return status.Errorf(codes.Internal, "failed to add agent to verifier, status %d: %s", addRes.StatusCode, string(bodyBytes))
+		}
+		
+		p.log.Info("Successfully added agent to verifier", "agent_uuid", agentID)
+		
+		// Re-check status after adding
+		statusReq, _ = http.NewRequest(http.MethodGet, keylimeStatusUrl, nil)
+		statusRes, err = httpClient.Do(statusReq)
+		if err != nil {
+			return status.Errorf(codes.Internal, "unable to check agent status after adding: %v", err)
+		}
+	}
+
 	var statusResults KeylimeVerifierStatusResponse
 	err = json.NewDecoder(statusRes.Body).Decode(&statusResults)
 	if err != nil {
@@ -137,10 +259,30 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 	keylimeOpState := statusResults.Results.OperationalState
 	p.log.Debug("Keylime Verifier Status Results", "operational_state", keylimeOpState)
 
-	// TODO - make this more robust and less hard-coded
-	if keylimeOpState != 3 && keylimeOpState != 4 {
-		return status.Errorf(codes.Internal, "Keylime agent is not in a verified state. Current state: %d", keylimeOpState)
+	// Wait for agent to reach valid state with retry logic
+	// Valid states: 1 (Registered), 3 (Get Quote - verified), 4 (Provide V - verified)
+	maxRetries := 15
+	retryDelay := 2 * time.Second
+
+	for i := 0; i < maxRetries && (keylimeOpState != 1 && keylimeOpState != 3 && keylimeOpState != 4); i++ {
+		p.log.Debug("Agent not yet in valid state, waiting", "agent_uuid", agentID, "state", keylimeOpState, "retry", i+1)
+		time.Sleep(retryDelay)
+
+		// Re-check status
+		statusReq, _ = http.NewRequest(http.MethodGet, keylimeStatusUrl, nil)
+		statusRes, err = httpClient.Do(statusReq)
+		if err == nil {
+			json.NewDecoder(statusRes.Body).Decode(&statusResults)
+			keylimeOpState = statusResults.Results.OperationalState
+			p.log.Debug("Updated agent state", "operational_state", keylimeOpState)
+		}
 	}
+
+	// Final check after retries
+	if keylimeOpState != 1 && keylimeOpState != 3 && keylimeOpState != 4 {
+		return status.Errorf(codes.Internal, "Keylime agent is not in a valid state after %d retries. Current state: %d (expected: 1=Registered, 3=Get Quote, or 4=Provide V)", maxRetries, keylimeOpState)
+	}
+	p.log.Info("Agent in valid state", "agent_uuid", agentID, "state", keylimeOpState)
 
 	// Create a nonce for use in a quote
 	keylimeNonce, err := common_keylime.NewNonce()
