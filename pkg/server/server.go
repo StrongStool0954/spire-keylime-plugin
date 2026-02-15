@@ -180,8 +180,11 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 		defer regRes.Body.Close()
 		
 		var regResults struct {
+		Code    int    `json:"code"`
 			Results struct {
 				AikTpm string `json:"aik_tpm"`
+				IP     string `json:"ip"`
+				Port   int    `json:"port"`
 			} `json:"results"`
 		}
 		err = json.NewDecoder(regRes.Body).Decode(&regResults)
@@ -237,8 +240,8 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 			RuntimePolicyName:       "",
 			SupportedVersion:        "2.5",
 			MtlsCert:                mtlsCertContent,
-			CloudAgentIP:            "10.10.2.70",
-			CloudAgentPort:          "9002",
+			CloudAgentIP:            regResults.Results.IP,
+			CloudAgentPort:          fmt.Sprintf("%d", regResults.Results.Port),
 		}
 		addBody, err := json.Marshal(addRequest)
 		if err != nil {
