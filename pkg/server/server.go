@@ -223,7 +223,7 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 		runtimePolicy := base64.StdEncoding.EncodeToString([]byte(imaPolicyJSON))
 
 		addRequest := KeylimeAgentAddRequest{
-			TpmPolicy:               `{"mask": "0x80"}`,
+			TpmPolicy:               `{"mask": "0x90"}`,
 			MetaData:                "{}",
 			MbRefstate:              "",
 			MbPolicy:                "",
