@@ -192,9 +192,35 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 		akTpm := regResults.Results.AikTpm
 		p.log.Debug("Retrieved AK from registrar", "ak_length", len(akTpm))
 		// Create agent add request with minimal policy
-		// RuntimePolicy needs to be base64 encoded with proper IMA policy structure
-		emptyRuntimePolicyJSON := `{"meta":{"version":5,"generator":0},"release":0,"digests":{},"excludes":[],"keyrings":{},"ima":{"ignored_keyrings":[],"log_hash_alg":"sha1","dm_policy":null},"ima-buf":{},"verification-keys":""}`
-		emptyRuntimePolicy := base64.StdEncoding.EncodeToString([]byte(emptyRuntimePolicyJSON))
+		// IMA Runtime Policy - Phase 2: Exclude-based policy (no allowlist)
+		imaPolicyJSON := `{
+  "meta": {
+    "version": 5,
+    "generator": 0
+  },
+  "release": 0,
+  "digests": {},
+  "excludes": [
+    "/var/",
+    "/tmp/",
+    "/home/",
+    "/proc/",
+    "/sys/",
+    "/dev/shm/",
+    "/run/",
+    "/dev/",
+    "/sys/firmware/"
+  ],
+  "keyrings": {},
+  "ima": {
+    "ignored_keyrings": [],
+    "log_hash_alg": "sha256",
+    "dm_policy": null
+  },
+  "ima-buf": {},
+  "verification-keys": ""
+}`
+		runtimePolicy := base64.StdEncoding.EncodeToString([]byte(imaPolicyJSON))
 
 		addRequest := KeylimeAgentAddRequest{
 			TpmPolicy:               `{"mask": "0x80"}`,
@@ -208,7 +234,7 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 			AcceptTpmEncryptionAlgs: "[\"rsa\", \"rsa2048\", \"ecc\"]",
 			AcceptTpmSigningAlgs:    "[\"rsassa\", \"rsapss\", \"ecdsa\", \"ecdaa\", \"ecschnorr\"]",
 			AkTpm:                   akTpm,
-			RuntimePolicy:           emptyRuntimePolicy,
+			RuntimePolicy:           runtimePolicy,
 			RuntimePolicyName:       "",
 			SupportedVersion:        "2.5",
 			MtlsCert:                mtlsCertContent,
