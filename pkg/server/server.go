@@ -25,7 +25,6 @@ import (
 	"github.com/spiffe/spire-plugin-sdk/pluginsdk"
 	nodeattestorv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/server/nodeattestor/v1"
 	configv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/service/common/config/v1"
-	"github.com/spiffe/spire/pkg/common/idutil"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -382,7 +381,7 @@ func (p *Plugin) Attest(stream nodeattestorv1.NodeAttestor_AttestServer) error {
 	}
 
 	// Create SPIFFE ID and selectors
-	spiffeID, err := idutil.AgentID(p.conf.trustDomain, fmt.Sprintf("/%s/%s", common_keylime.PluginName, keylimeAgentData.AgentID))
+	spiffeID, err := common_keylime.AgentID(p.conf.trustDomain, fmt.Sprintf("/%s/%s", common_keylime.PluginName, keylimeAgentData.AgentID))
 	if err != nil {
 		return status.Errorf(codes.Internal, "failed to create agent ID: %v", err)
 	}
